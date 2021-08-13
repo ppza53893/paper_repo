@@ -5,10 +5,11 @@ from tensorflow.keras import Model
 from tensorflow.keras.optimizers import Adam
 from tensorflow.keras.callbacks import (EarlyStopping, ModelCheckpoint,
                                         ReduceLROnPlateau, TensorBoard)
+from datetime import datetime
 
 from lap_layers import get_vgg19_encoder, get_decoder
 from lap_dataset import TFDataLoader
-from lap_losses import prepare_draft_losses
+from lap_losses import *
 
 
 current_dir = os.path.split(os.path.abspath(__file__))[0]
@@ -25,27 +26,28 @@ class DraftNetModel(Model):
     
     def compile(
         self,
-        optimizer,
-        losses
+        optimizer
     ):
         super(DraftNetModel, self).compile()
         self.optimizer = optimizer
 
-        self.content_loss = losses[0]
-        self.style_loss = losses[1]
-        self.identity_loss_1 = losses[2]
-        self.identity_loss_2 = losses[3]
-        self.style_remd_loss = losses[4]
-        self.content_relt_loss = losses[5]
+        self.content_loss = content_loss
+        self.style_loss = style_loss
+        self.identity_loss_1 = identity_loss
+        #self.identity_loss_2 = content_loss
+        self.style_remd_loss = style_remd_loss
+        self.content_relt_loss = content_relt_loss
 
+        self.vgg_encoder = lambda x: self.encoder(x, training=False)
+        #self.train_step = tf.function(experimental_relax_shapes=True)(self.train_step)
 
     def train_step(self, data):
         ci, si = data[0], data[1]
-        cF = self.encoder(ci, training=False)
-        sF = self.encoder(si, training=False)
+        cF = self.vgg_encoder(ci)
+        sF = self.vgg_encoder(si)
 
-        with tf.GradientTape(watch_accessed_variables=False) as tape:
-            tape.watch(self.decoder.trainable_variables)
+        with tf.GradientTape() as tape:
+
             # draft output
             stylized = self.decoder([
                 cF[3], sF[3], cF[2], sF[2], cF[1], sF[1]
@@ -57,30 +59,37 @@ class DraftNetModel(Model):
                 cF[3], cF[3], cF[2], cF[2], cF[1], cF[1]
             ], training=True)
 
-            # Featured stylized(content, content)
-            # using identity loss
-            Fcc = self.encoder(Icc, training=False)
+            with tape.stop_recording():
+                # Featured stylized(content, content)
+                # using identity loss
+                Fcc = self.vgg_encoder(Icc)
 
-            # prepare backward
-            tF = self.encoder(stylized, training=False)
+                # prepare backward
+                tF = self.vgg_encoder(stylized)
 
             # lp, content loss
-            loss_c = self.content_loss(*(cF+tF))
+            loss_c = self.content_loss(cF[0], tF[0])+self.content_loss(cF[1], tF[1])+\
+                self.content_loss(cF[2], tF[2])+self.content_loss(cF[3], tF[3])+\
+                    self.content_loss(cF[4], tF[4])
 
             # lm, style loss
-            loss_s = self.style_loss(*(sF+tF))
+            loss_s = self.style_loss(sF[0], tF[0])+self.style_loss(sF[1], tF[1])+\
+                self.style_loss(sF[2], tF[2])+self.style_loss(sF[3], tF[3])+\
+                    self.style_loss(sF[4], tF[4])
 
             # identity loss 1
             loss_il1 = self.identity_loss_1(ci, Icc)
 
             # identity loss 2s
-            loss_il2 = self.identity_loss_2(*(cF+Fcc))
+            loss_il2 = self.content_loss(cF[0], Fcc[0])+self.content_loss(cF[1], Fcc[1])+\
+                self.content_loss(cF[2], Fcc[2])+self.content_loss(cF[3], Fcc[3])+\
+                    self.content_loss(cF[4], Fcc[4])
 
             # lr, style rEMD loss
-            loss_r = self.style_remd_loss(sF[2], sF[3], tF[2], tF[3])
+            loss_r = self.style_remd_loss(sF[2], tF[2]) + self.style_remd_loss(sF[3], tF[3])
 
             # lss, content relative loss
-            loss_ss = self.content_relt_loss(cF[2], cF[3], tF[2], tF[3])
+            loss_ss = self.content_relt_loss(cF[2], tF[2]) + self.content_relt_loss(cF[3], tF[3])
 
             #loss
             loss = loss_c*1. + loss_s*3. + loss_il1*50. + loss_il2*1. + loss_r*10. + loss_ss*16.
@@ -102,41 +111,54 @@ class DraftNetModel(Model):
 
     def test_step(self, data):
         ci, si = data[0], data[1]
-        cF = self.encoder(ci, training=False)
-        sF = self.encoder(si, training=False)
+        cF = self.vgg_encoder(ci)
+        sF = self.vgg_encoder(si)
 
         stylized = self.decoder([
             cF[3], sF[3], cF[2], sF[2], cF[1], sF[1]
         ], training=False)
 
-        # prepare backward
-        tF = self.encoder(stylized, training=False)
-
-        # lp, content loss
-        loss_c = self.content_loss(*(cF+tF))
-
-        # lm, style loss
-        loss_s = self.style_loss(*(sF+tF))
-        
-        # identity loss 1
-        # content vs stylized(content, content)
+        # stylized(content, content)
+        # using identity loss
         Icc = self.decoder([
             cF[3], cF[3], cF[2], cF[2], cF[1], cF[1]
         ], training=False)
+
+        # Featured stylized(content, content)
+        # using identity loss
+        Fcc = self.vgg_encoder(Icc)
+
+        # prepare backward
+        tF = self.vgg_encoder(stylized)
+
+        loss_c = self.content_loss(cF[0], tF[0])+self.content_loss(cF[1], tF[1])+\
+            self.content_loss(cF[2], tF[2])+self.content_loss(cF[3], tF[3])+\
+                self.content_loss(cF[4], tF[4])
+
+        # lm, style loss
+        # graph: 3
+        loss_s = self.style_loss(sF[0], tF[0])+self.style_loss(sF[1], tF[1])+\
+            self.style_loss(sF[2], tF[2])+self.style_loss(sF[3], tF[3])+\
+                self.style_loss(sF[4], tF[4])
+
+        # identity loss 1
         loss_il1 = self.identity_loss_1(ci, Icc)
 
-        # identity loss 2
-        # Featured content cs Featured stylized(content, content)
-        Fcc = self.encoder(Icc, training=False)
-        loss_il2 = self.identity_loss_2(*(cF+Fcc))
+        # identity loss 2s
+        #loss_il2 = self.identity_loss_2(*(cF+Fcc))
+        loss_il2 = self.content_loss(cF[0], Fcc[0])+self.content_loss(cF[1], Fcc[1])+\
+            self.content_loss(cF[2], Fcc[2])+self.content_loss(cF[3], Fcc[3])+\
+                self.content_loss(cF[4], Fcc[4])
 
         # lr, style rEMD loss
-        loss_r = self.style_remd_loss(sF[2], sF[3], tF[2], tF[3])
+        # loss_r = self.style_remd_loss(sF[2], sF[3], tF[2], tF[3])
+        loss_r = self.style_remd_loss(sF[2], tF[2]) + self.style_remd_loss(sF[3], tF[3])
 
         # lss, content relative loss
-        loss_ss = self.content_relt_loss(cF[2], cF[3], tF[2], tF[3])
+        # loss_ss = self.content_relt_loss(cF[2], cF[3], tF[2], tF[3])
+        loss_ss = self.content_relt_loss(cF[2], tF[2]) + self.content_relt_loss(cF[3], tF[3])
 
-        #l draft
+        #loss
         loss = loss_c*1. + loss_s*3. + loss_il1*50. + loss_il2*1. + loss_r*10. + loss_ss*16.
 
         return {
@@ -158,18 +180,20 @@ class DraftNetModel(Model):
             cF[3], sF[3], cF[2], sF[2], cF[1], sF[1]
         ], training=False)
 
+    def call(self, data, training=False, mask=None):
+        return self.predict_step(data)
 
-def main():
-    train_idg = TFDataLoader(coco2017_path, style_path, 5, 'Train', limits=20000).gen_ds()
-    val_idg = TFDataLoader(v_coco2017_path, style_path, 5, 'Val', shuffle=False).gen_ds()
+
+def main_seq():
+    trainer = TFDataLoader(coco2017_path, style_path, 5, 'Train', limits=None).gen_ds()
+    validation = TFDataLoader(v_coco2017_path, style_path, 5, 'Val', shuffle=False).gen_ds()
 
     trainer_model = DraftNetModel()
     trainer_model.compile(
-        optimizer=Adam(lr=1e-04),
-        losses=prepare_draft_losses()
+        optimizer=Adam(lr=1e-04)
     )
 
-    weight_name = 'draft.h5'
+    weight_name = 'draft_model.h5'
     # コールバック
     ## val_lossが更新されたときだけmodelを保存
     mc_cb = ModelCheckpoint(weight_name, verbose=1, save_best_only=True, monitor='val_draft_loss', save_weights_only=True, mode='min')
@@ -178,13 +202,14 @@ def main():
     ## 学習が進まなくなったら、強制的に学習終了
     es_cb = EarlyStopping(monitor='draft_loss', patience=30, verbose=1)
     ## TensorBoardにログを書き込む
-    tb_cb = TensorBoard(log_dir='tb_logs')
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    tb_cb = TensorBoard(log_dir='tfr_train/{}'.format(stamp))
 
     trainer_model.fit(
-        train_idg, validation_data=val_idg,
-        epochs=100,
+        trainer, validation_data=validation,
+        epochs=1000,
         callbacks=[mc_cb, rl_cb, es_cb, tb_cb])
 
 
 if __name__ == '__main__':
-    main()
+    main_seq()

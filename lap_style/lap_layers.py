@@ -20,48 +20,42 @@ class AdaIN(Layer):
     Return:
         Normalized content_feat with shape (N, H, W, C)
     """
-    def __init__(self, eps = 1e-05):
-        super().__init__()
-        self.eps = eps
 
     def call(self, inputs):
-        content_feat, style_feat = inputs[0], inputs[1]
-        reduction_axes = [1,2]
-        
-        style_mean = tf.math.reduce_mean(style_feat, reduction_axes, keepdims=True)
-        style_std = tf.math.reduce_std(style_feat, reduction_axes, keepdims=True) + self.eps
+        with tf.name_scope('op_adaIN'):
+            style_mean = tf.math.reduce_mean(inputs[1], [1,2], keepdims=True)
+            content_mean = tf.math.reduce_mean(inputs[0], [1,2], keepdims=True)
 
-        content_mean = tf.math.reduce_mean(content_feat, reduction_axes, keepdims=True)
-        content_std = tf.math.reduce_std(content_feat, reduction_axes, keepdims=True) + self.eps
+            style_std = tf.add(tf.math.reduce_std(inputs[1], [1,2], keepdims=True), tf.constant(1e-05))
+            content_std = tf.add(tf.math.reduce_std(inputs[0], [1,2], keepdims=True), tf.constant(1e-05))
 
-        normalized_feat = (content_feat - content_mean) / content_std
-        return normalized_feat * style_std + style_mean
+            normalized_feat = tf.divide(tf.subtract(inputs[0], content_mean), content_std)
+            return tf.add(tf.multiply(normalized_feat, style_std), style_mean)
 
 
 class ReflectionPadding2D(Layer):
     """Implements Reflection Padding as a layer.
 
     Args:
-        padding(tuple): Amount of padding for the
+        padding(int): Amount of padding for the
         spatial dimensions.
 
     Returns:
         A padded tensor with the same type as the input tensor.
     """
 
-    def __init__(self, padding=(1, 1), **kwargs):
-        self.padding = tuple(padding)
+    def __init__(self, padding_size = 1, **kwargs):
         super(ReflectionPadding2D, self).__init__(**kwargs)
-
-    def call(self, input_tensor, mask=None):
-        padding_width, padding_height = self.padding
-        padding_tensor = [
+        padding_width = padding_height = padding_size
+        self.padding_tensor = tf.convert_to_tensor([
             [0, 0],
             [padding_height, padding_height],
             [padding_width, padding_width],
             [0, 0],
-        ]
-        return tf.pad(input_tensor, padding_tensor, mode="REFLECT")
+        ])
+
+    def call(self, input_tensor):
+        return tf.pad(input_tensor, self.padding_tensor, mode="REFLECT")
 
 
 class ResnetBlock(Layer):

@@ -1,198 +1,87 @@
-from typing import Union
-
-import numpy as np
 import tensorflow as tf
 
 
-def calc_mean_std(feat, eps: float=1e-05):
-    mean = tf.math.reduce_mean(feat, axis=[1,2], keepdims=True)
-    std = tf.math.reduce_std(feat, axis=[1,2], keepdims=True) + eps
-    return mean, std
+__all__ = [
+    "content_loss",
+    "content_relt_loss",
+    "identity_loss",
+    "style_loss",
+    "style_remd_loss"
+]
 
 
-def calc_variance_norm(feat: tf.Tensor):
-    """mean_variance_norm.
-
-    Args:
-        feat (tf.Tensor): Tensor with shape (N, H, W, C).
-
-    Return:
-        Normalized feat with shape (N, H, W, C)
-    """
-    mean, std = calc_mean_std(feat)
-    return tf.math.divide_no_nan((feat-mean), std)
+MSE = tf.keras.losses.MeanSquaredError()
 
 
-def calc_emb_loss(y_true, y_pred):
-    yt_norm = tf.math.l2_normalize(y_true, axis=-1)
-    yp_norm = tf.math.l2_normalize(y_pred, axis=-1)
-    return 1. - tf.reduce_sum(yt_norm * yp_norm, axis=-1)
+@tf.function(experimental_relax_shapes=True)
+def content_loss(y_true, y_pred):
+    with tf.name_scope('op_content'):
+        yt_m = tf.math.reduce_mean(y_true, axis=[1,2], keepdims=True)
+        yp_m = tf.math.reduce_mean(y_pred, axis=[1,2], keepdims=True)
+
+        yt_std = tf.math.reduce_std(y_true, axis=[1,2], keepdims=True)
+        yp_std = tf.math.reduce_std(y_pred, axis=[1,2], keepdims=True)
+
+        yt_ns = tf.divide(tf.subtract(y_true, yt_m), yt_std+tf.constant(1e-05))
+        yp_ns = tf.divide(tf.subtract(y_pred, yp_m), yp_std+tf.constant(1e-05))
+        return MSE(yt_ns, yp_ns)
 
 
-class Base:
-    def call(self, y_true, y_pred):
-        return self.__call__(y_true, y_pred)
-    
-    def __call__(self, y_true, y_pred):
-        pass
+@tf.function(experimental_relax_shapes=True)
+def identity_loss(y_true, y_pred):
+    with tf.name_scope('op_identity1'):
+        return MSE(y_true, y_pred)
 
 
-class CalcStyleEmdLoss(Base):
-    """Calc Style Emd Loss.
-    """
-    def __call__(
-        self,
-        y_true: Union[tf.Tensor, np.ndarray],
-        y_pred: Union[tf.Tensor, np.ndarray]
-        ):
-        """Forward Function.
+@tf.function(experimental_relax_shapes=True)
+def style_loss(y_true, y_pred):
+    with tf.name_scope('op_style'):
+        yt_m = tf.math.reduce_mean(y_true, axis=[1,2], keepdims=True)
+        yp_m = tf.math.reduce_mean(y_pred, axis=[1,2], keepdims=True)
 
-        Args:
-            y_pred (tf.Tensor): of shape (N, H, W, C). Predicted tensor.
-            y_true (tf.Tensor): of shape (N, H, W, C). Ground truth tensor.
-        """
-        y_true = tf.cast(y_true, tf.float32)
-        y_pred = tf.cast(y_pred, tf.float32)
+        yt_std = tf.math.reduce_std(y_true, axis=[1,2], keepdims=True)
+        yp_std = tf.math.reduce_std(y_pred, axis=[1,2], keepdims=True)
 
-        CX_M = calc_emb_loss( y_true, y_pred)
-        m1 = tf.reduce_mean(tf.reduce_min(CX_M, axis=2))
-        m2 = tf.reduce_mean(tf.reduce_min(CX_M, axis=1))
-        m = tf.stack([m1, m2])
-        return tf.reduce_max(m)
+        return tf.add(MSE(yt_m, yp_m), MSE(yt_std, yp_std))
 
 
-class CalcContentReltLoss(Base):
-    """Calc Content Relt Loss.
-    """
-    def __call__(
-        self,
-        y_true: Union[tf.Tensor, np.ndarray],
-        y_pred: Union[tf.Tensor, np.ndarray]
-        ):
-        """Forward Function.
+@tf.function(experimental_relax_shapes=True)
+def content_relt_loss(y_true, y_pred):
+    with tf.name_scope('op_content_relative'):
+        # square
+        yt_square = tf.math.square(y_true)
+        yp_square = tf.math.square(y_pred)
 
-        Args:
-            y_pred (tf.Tensor): of shape (N, H, W, C). Predicted tensor.
-            y_true (tf.Tensor): of shape (N, H, W, C). Ground truth tensor.
-        """
-        y_true = tf.cast(y_true, tf.float32)
-        y_pred = tf.cast(y_pred, tf.float32)
+        # calc
+        yt_ns = tf.math.divide_no_nan(yt_square, tf.reduce_sum(yt_square, axis=-1, keepdims=True))
+        yp_ns = tf.math.divide_no_nan(yp_square, tf.reduce_sum(yp_square, axis=-1, keepdims=True))
 
-        dM = 1.
-        Mx = calc_emb_loss(y_pred, y_pred)
-        Mx = tf.math.divide_no_nan(Mx, tf.reduce_sum(Mx, axis=1, keepdims=True))
-        My = calc_emb_loss(y_true, y_true)
-        My = tf.math.divide_no_nan(My, tf.reduce_sum(My, axis=1, keepdims=True))
-        loss_content = tf.reduce_mean(tf.abs(dM * (Mx - My))) * y_pred.shape[1] * y_pred.shape[2]
-        return loss_content
+        # distance
+        yt_dist = tf.subtract(tf.constant(1.0), tf.reduce_sum(yt_ns, axis=-1))
+        yp_dist = tf.subtract(tf.constant(1.0), tf.reduce_sum(yp_ns, axis=-1))
 
+        # divide
+        yt_mx = tf.math.divide_no_nan(yt_dist, tf.reduce_sum(yt_dist, axis=-1, keepdims=True))
+        yp_mx = tf.math.divide_no_nan(yt_dist, tf.reduce_sum(yp_dist, axis=-1, keepdims=True))
 
-class CalcContentLoss(Base):
-    """Calc Content Loss.
-    """
-    def __init__(self, norm: bool=False):
-        self.mse = tf.keras.losses.MeanSquaredError()
-        self.norm = norm
-
-    def __call__(
-        self,
-        y_true: Union[tf.Tensor, np.ndarray],
-        y_pred: Union[tf.Tensor, np.ndarray],
-        ):
-        """Forward Function.
-
-        Args:
-            y_pred (tf.Tensor): of shape (N, H, W, C). Predicted tensor.
-            y_true (tf.Tensor): of shape (N, H, W, C). Ground truth tensor.
-        """
-        y_true = tf.cast(y_true, tf.float32)
-        y_pred = tf.cast(y_pred, tf.float32)
-
-        if not self.norm:
-            loss =  self.mse(y_true, y_pred)
-        else:
-            loss = self.mse(
-                calc_variance_norm(y_true),
-                calc_variance_norm(y_pred)
-            )
-        return loss
+        # avg, multiply
+        mxy = tf.reduce_mean(tf.abs(tf.subtract(yt_mx, yp_mx)))
+        mul_var = tf.convert_to_tensor(y_true.shape[1]*y_true.shape[2], tf.float32)
+        return tf.multiply(mxy, mul_var)
 
 
-class CalcStyleLoss(Base):
-    """Calc Style Loss.
-    """
-    def __init__(self):
-        self.mse = tf.keras.losses.MeanSquaredError()
+@tf.function(experimental_relax_shapes=True)
+def style_remd_loss(y_true, y_pred):
+    with tf.name_scope('op_style_rEMD'):
+        # l2
+        yt_l2 = tf.math.l2_normalize(y_true, axis=-1)
+        yp_l2 = tf.math.l2_normalize(y_pred, axis=-1)
 
-    def __call__(
-        self,
-        y_true: Union[tf.Tensor, np.ndarray],
-        y_pred: Union[tf.Tensor, np.ndarray]
-        ):
-        """
-        Args:
-            y_pred (tf.Tensor): of shape (N, H, W, C). Predicted tensor.
-            y_true (tf.Tensor): of shape (N, H, W, C). Ground truth tensor.
-        """
-        y_true = tf.cast(y_true, tf.float32)
-        y_pred = tf.cast(y_pred, tf.float32)
+        # dot
+        ytp = tf.einsum('ijkl,ijkl->ijk', yt_l2, yp_l2)
+        emb = tf.subtract(tf.constant(1.0), ytp)
 
-        pred_mean, pred_std = calc_mean_std(y_pred)
-        target_mean, target_std = calc_mean_std(y_true)
-        loss = self.mse(target_mean, pred_mean) + self.mse(target_std, pred_std)
-        return loss
+        m1 = tf.reduce_mean(tf.reduce_min(emb, axis=1))
+        m2 = tf.reduce_mean(tf.reduce_min(emb, axis=2))
 
-
-def content_w_range(
-    yt_1, yt_2, yt_3, yt_4, yt_5, yp_1, yp_2, yp_3, yp_4, yp_5
-):
-    loss_fn = CalcContentLoss(norm=True)
-    loss = loss_fn(yt_1, yp_1)
-    loss += loss_fn(yt_2, yp_2)
-    loss += loss_fn(yt_3, yp_3)
-    loss += loss_fn(yt_4, yp_4)
-    loss += loss_fn(yt_5, yp_5)
-    return loss
-
-
-def content_wo_range(y_true, y_pred):
-    return CalcContentLoss()(y_true, y_pred)
-
-
-def style_w_range(
-    yt_1, yt_2, yt_3, yt_4, yt_5, yp_1, yp_2, yp_3, yp_4, yp_5
-):
-    loss_fn =  CalcStyleLoss()
-    loss = loss_fn(yt_1, yp_1)
-    loss += loss_fn(yt_2, yp_2)
-    loss += loss_fn(yt_3, yp_3)
-    loss += loss_fn(yt_4, yp_4)
-    loss += loss_fn(yt_5, yp_5)
-    return loss
-
-
-def style_remd(
-    yt_3, yt_4, yp_3, yp_4
-):
-    loss_fn = CalcStyleEmdLoss()
-    return loss_fn(yt_3, yp_3) + loss_fn(yt_4, yp_4)
-
-
-def content_relt(
-    yt_3, yt_4, yp_3, yp_4
-):
-    loss_fn = CalcContentReltLoss()
-    return loss_fn(yt_3, yp_3) + loss_fn(yt_4, yp_4)
-
-
-def prepare_draft_losses():
-    content_loss = content_w_range
-    style_loss = style_w_range
-    identity_loss_1 = CalcContentLoss().call
-    identity_loss_2 = content_w_range
-    style_remd_loss = style_remd
-    content_relt_loss = content_relt
-
-    return content_loss, style_loss, identity_loss_1, identity_loss_2, style_remd_loss, content_relt_loss
-
-
+        return tf.reduce_max(tf.stack([m1, m2]))
